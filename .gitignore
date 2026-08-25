@@ -1,0 +1,4 @@
+.env
+play/
+*.log
+bin/
