@@ -2,3 +2,7 @@
 play/
 *.log
 bin/
+CLAUDE.md
+plan.md
+docs/implementation-plan.md
+docs/ai-prompts.md
