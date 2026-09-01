@@ -579,9 +579,6 @@ instances (see `plan.md`'s "Live end-to-end verification").
 
 ## Further docs
 
-- [`CLAUDE.md`](./CLAUDE.md) — the full rule set (stack, layering, naming,
-  response shape, DB rules, cross-cutting infra, what to avoid).
-- [`plan.md`](./plan.md) — video scope vs. homework.
 - [`docs/folder-structure.md`](./docs/folder-structure.md) — annotated tree.
 - [`docs/system-design.md`](./docs/system-design.md) — platform diagram,
   sync/async flows, failure modes, Mongo-dedupe rationale.
@@ -589,7 +586,5 @@ instances (see `plan.md`'s "Live end-to-end verification").
   request/response shape and error code.
 - [`docs/node-to-go-mapping.md`](./docs/node-to-go-mapping.md) — TS idiom →
   Go idiom, side by side, for every layer.
-- [`docs/ai-prompts.md`](./docs/ai-prompts.md) — prompt templates for the
-  homework.
 - [`docs/implementation-plan.md`](./docs/implementation-plan.md) — phased
   build order with acceptance checks per phase.
