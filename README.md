@@ -9,12 +9,14 @@ It does **not** own users, restaurants, products, orders, or payments, does
 **not** write to any operational data store, and does **not** emit events of
 its own.
 
-> This is a teaching artifact built as one full vertical slice end-to-end
-> (`agg_restaurant_day` + `order.placed`), with the rest of the surface
-> documented as homework. See [`plan.md`](./plan.md) for exactly what's
-> built vs. what's left, and [`docs/node-to-go-mapping.md`](./docs/node-to-go-mapping.md)
-> if you're coming from the Node services in this monorepo
-> (`core-service`, `order-service`) and want the TS → Go translation.
+> This is a teaching artifact built as a full vertical slice end-to-end —
+> four aggregate collections, four inbound events, eight read endpoints —
+> with a `rbac.permissions_changed` cache-invalidation consumer and a
+> backfill command left as homework. See [`plan.md`](./plan.md) for
+> exactly what's built vs. what's left, and
+> [`docs/node-to-go-mapping.md`](./docs/node-to-go-mapping.md) if you're
+> coming from the Node services in this monorepo (`core-service`,
+> `order-service`) and want the TS → Go translation.
 
 ---
 
@@ -75,8 +77,9 @@ order-service ──(order.placed, RabbitMQ topic "order.events")──▶ analy
 
 - **Inbound async:** one RabbitMQ consumer, queue
   `analytics-service.order-events`, bound to `order.#` and `payment.#` on
-  the `order.events` topic exchange. Only `order.placed` has a handler
-  wired up today; everything else is acked and skipped (see
+  the `order.events` topic exchange. `order.placed`, `order.delivered`,
+  `order.rejected`, and `payment.completed` all have handlers wired up;
+  anything else is acked and skipped (see
   `app/analytics/eventhandlers/handlers.go`).
 - **Idempotency:** every event is deduped through a `event_ids` Mongo
   collection with a unique index on `event_id` — see
@@ -85,7 +88,7 @@ order-service ──(order.placed, RabbitMQ topic "order.events")──▶ analy
 - **Outbound sync:** one HTTP call to core-service
   (`GET /api/internal/rbac/permissions?role=...`), cached in-process by role
   with a TTL (`lib/rbac/cache.go`).
-- **HTTP API:** one read endpoint, JWT-authenticated, RBAC-gated.
+- **HTTP API:** eight read endpoints, JWT-authenticated, RBAC-gated.
 
 ## Folder structure
 
@@ -177,7 +180,7 @@ Expected boot log (structured JSON, one line per event):
 {"time":"...","level":"INFO","msg":"mongo indexes ensured"}
 {"time":"...","level":"INFO","msg":"rabbit connected"}
 {"time":"...","level":"INFO","msg":"event consumer started","queue":"analytics-service.order-events","bindings":["order.#","payment.#"]}
-{"time":"...","level":"INFO","msg":"http listening","port":4001}
+{"time":"...","level":"INFO","msg":"http listening","port":4002}
 ```
 
 **Terminal 2 — mock core-service** (serves the RBAC permissions lookup):
@@ -199,7 +202,7 @@ go run ./play/mint-jwt -role restaurant_user -restaurantRole owner -restaurantId
 # copy the printed token into TOKEN=
 
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:4001/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31" | jq
+  "http://localhost:4002/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31" | jq
 ```
 
 Expected response after one `publish-test` run:
@@ -230,7 +233,7 @@ Run these **in order** against the three terminals above.
    started, http listening).
 3. **Health check:**
    ```bash
-   curl -s http://localhost:4001/health
+   curl -s http://localhost:4002/health
    # {"success":true,"data":{"status":"ok"}}
    ```
 4. **Publish an event and check Mongo:**
@@ -253,7 +256,7 @@ Run these **in order** against the three terminals above.
    ```
 7. **No auth → 401:**
    ```bash
-   curl -s "http://localhost:4001/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31"
+   curl -s "http://localhost:4002/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31"
    # {"success":false,"error":{"code":"UNAUTHENTICATED","message":"User not authenticated"}}
    ```
 8. **Garbage token → 401** (same shape as above, `-H "Authorization: Bearer garbage"`).
@@ -261,7 +264,7 @@ Run these **in order** against the three terminals above.
    ```bash
    TOKEN=$(go run ./play/mint-jwt -role restaurant_user -restaurantRole owner -restaurantId 42 | head -1)
    curl -s -H "Authorization: Bearer $TOKEN" \
-     "http://localhost:4001/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31" | jq
+     "http://localhost:4002/api/v1/analytics/restaurants/42/days?from=2026-01-01&to=2026-12-31" | jq
    # data: [{"date":"...","ordersCount":2,"revenueMinor":4000,"currency":"EGP","avgOrderMinor":2000}]
    ```
    `avgOrderMinor: 2000` (4000/2) confirms the average is derived in the
@@ -318,17 +321,24 @@ RBAC: caller needs the `analytics:read` permission (see
 }
 ```
 
-Full request/response shapes and every error code:
-[`docs/api-contracts.md`](./docs/api-contracts.md).
+### Everything else
+
+Seven more endpoints — `GET /restaurants/:id/failures`,
+`GET /restaurants/:id/delivery-avg`, `GET /restaurants/active`,
+`GET /branches/:id/days`, `GET /branches/:id/products/:productId/days`,
+`GET /platform/days`, `GET /platform/summary` — share this same
+auth/RBAC/`from`/`to` pattern. Full request/response shapes and every
+error code: [`docs/api-contracts.md`](./docs/api-contracts.md).
 
 ## Events consumed
 
-| Event type      | Exchange       | Handler                     | Status |
-| ---------------- | -------------- | ---------------------------- | ------ |
-| `order.placed`   | `order.events` | applies to `agg_restaurant_day` | ✅ built |
-| `payment.completed` | `order.events` | —                          | homework |
-| `order.delivered`   | `order.events` | —                          | homework |
-| `order.rejected`    | `order.events` | —                          | homework |
+| Event type           | Exchange        | Handler                                                              | Status |
+| --------------------- | --------------- | ---------------------------------------------------------------------- | ------ |
+| `order.placed`        | `order.events`  | fans out to `agg_restaurant_day`, `agg_branch_day`, `agg_product_day`, `agg_platform_day`, `order_context` | ✅ built |
+| `order.delivered`     | `order.events`  | delivery-duration onto `agg_restaurant_day`/`agg_branch_day`/`agg_platform_day`, looked up via `order_context` | ✅ built |
+| `order.rejected`      | `order.events`  | `failed_count` onto `agg_restaurant_day`/`agg_branch_day`/`agg_platform_day` | ✅ built |
+| `payment.completed`   | `order.events`  | online-payment counters onto `agg_platform_day`                         | ✅ built |
+| `rbac.permissions_changed` | `core.events` | `permCache.Invalidate(role)` — see `lib/rbac/eventhandler.go`      | ✅ built |
 
 Topology: topic exchange `order.events` (declared by `order-service`),
 queue `analytics-service.order-events`, bindings `order.#, payment.#`, DLQ
@@ -337,17 +347,32 @@ seen (see `lib/coreevents/consumer.go`) and nacks without requeue, routing
 the message to the DLQ so a bad message can be inspected/replayed rather
 than looping forever.
 
+`rbac.permissions_changed` arrives on a **second**, unrelated exchange
+(`core.events`, declared by `core-service`) — a second consumer/queue/
+binding (`analytics-service.core-events`), not a new routing key on the
+`order.events` consumer above. Same broker connection and `event_ids`
+dedupe collection are reused (see `lib/boot/boot.go`).
+
 `order.placed` payload consumed (subset of what `order-service` actually
-publishes — extra fields like `items`, `orderId`, `branchId` are ignored):
+publishes — extra fields like `status`, `paymentMethod`, `subtotal` are
+ignored):
 
 ```json
 {
+  "orderId": "2eebdcdc-554d-4e1d-b2fe-ee8a9f152e02",
   "restaurantId": 42,
+  "branchId": 7,
   "total": 2500,
   "currency": "EGP",
+  "items": [{ "productId": 1, "quantity": 2, "unitPrice": 1000, "lineTotal": 2000 }],
   "placedAt": "2026-08-25T10:00:00.000Z"
 }
 ```
+
+`order.delivered`, `order.rejected`, and `payment.completed` payloads
+consumed: see the doc comments on the matching payload structs in
+`app/analytics/eventhandlers/handlers.go` — each declares only the fields
+that handler actually reads, same convention as `order.placed` above.
 
 ## Response envelope & error codes
 
@@ -377,7 +402,7 @@ value.
 
 | Var | Default | Notes |
 | --- | ------- | ----- |
-| `PORT` | `4001` | |
+| `PORT` | `4002` | |
 | `NODE_ENV` | `development` | |
 | `ACCESS_SECRET` | *(required)* | shared with core/order-service |
 | `MONGO_URI` | `mongodb://localhost:27017` | |
@@ -389,11 +414,18 @@ value.
 | `RABBITMQ_ANALYTICS_BINDINGS` | `order.#,payment.#` | |
 | `RABBITMQ_ANALYTICS_DLX` / `_DLQ` | `order.events.dlx` / `analytics-service.order-events.dlq` | |
 | `RABBITMQ_PREFETCH` | `32` | max in-flight unacked messages |
+| `RABBITMQ_CORE_EVENTS_EXCHANGE` | `core.events` | declared by core-service; unrelated to `RABBITMQ_ORDER_EVENTS_EXCHANGE` above |
+| `RABBITMQ_ANALYTICS_CORE_EVENTS_QUEUE` | `analytics-service.core-events` | |
+| `RABBITMQ_ANALYTICS_CORE_EVENTS_BINDINGS` | `rbac.permissions_changed` | |
+| `RABBITMQ_ANALYTICS_CORE_EVENTS_DLX` / `_DLQ` | `core.events.dlx` / `analytics-service.core-events.dlq` | |
 | `CORE_SERVICE_BASE_URL` | *(required)* | point at `play/mock-core` in dev |
 | `CORE_INTERNAL_API_KEY` | *(required)* | `api-key` header value |
 | `CORE_HTTP_TIMEOUT_MS` | `5000` | |
-| `RBAC_CACHE_TTL_SEC` | `300` | in-process permission cache TTL |
+| `ORDER_SERVICE_BASE_URL` | `http://localhost:4000` | `cmd/backfill-aggs` only — the live api process never calls order-service |
+| `ORDER_SERVICE_INTERNAL_API_KEY` | *(empty)* | must match order-service's own `INTERNAL_API_KEY`; `cmd/backfill-aggs` refuses to start without it |
+| `RBAC_CACHE_TTL_SEC` | `300` | in-process permission cache TTL — bounds staleness even if a `rbac.permissions_changed` event is lost |
 | `EVENT_DEDUPE_TTL_DAYS` | `7` | TTL index on `event_ids.received_at` |
+| `ORDER_CONTEXT_TTL_DAYS` | `45` | TTL index on `order_context.recorded_at` — must outlive the gap between `order.placed` and a (possibly slow) `order.delivered`/`order.rejected` |
 
 `.env` is loaded with a tiny built-in dotenv reader (`lib/config/env.go`) —
 it never overrides a var already set in the real environment, same
@@ -407,11 +439,57 @@ outside `cmd/`.
 | Tool | Purpose |
 | ---- | ------- |
 | `play/mint-jwt` | prints an access token signed with the same `ACCESS_SECRET` the API reads from `.env` |
-| `play/mock-core` | stands in for core-service's RBAC permissions endpoint |
-| `play/publish-test` | publishes a single `order.placed` event to RabbitMQ in the real envelope shape |
-| `play/check-mongo` | prints `agg_restaurant_day` rows for a restaurant, no mongo shell needed |
+| `play/mock-core` | stands in for core-service's RBAC permissions endpoint; `POST /set-permissions?role=<role>` (body: comma-separated permissions) overrides a role's answer at runtime, no restart, for testing `rbac.permissions_changed` |
+| `play/publish-test` | publishes one event to RabbitMQ in the real envelope shape — `-event order.placed\|order.delivered\|order.rejected\|payment.completed\|rbac.permissions_changed` (the last one publishes to `core.events`, not `order.events`) |
+| `play/check-mongo` | prints rows from any of this service's collections, no mongo shell needed — `-collection agg_restaurant_day\|agg_branch_day\|agg_product_day\|agg_platform_day\|order_context` |
 
 Each is `go run`-able directly; run `go run ./play/<tool> -h` for flags.
+
+### Testing the `rbac.permissions_changed` consumer
+
+With `cmd/api`, `play/mock-core -permissions ""`, and RabbitMQ all running:
+
+```powershell
+# 1. Warm the cache with a 403 (role has no analytics:read yet)
+curl.exe -H "Authorization: Bearer $TOKEN" http://localhost:4002/api/v1/analytics/restaurants/42/days?from=2026-08-01&to=2026-08-31
+# -> 403 FORBIDDEN
+
+# 2. Grant the permission — no restart needed
+curl.exe -X POST "http://localhost:4100/set-permissions?role=restaurant_owner" -d "analytics:read"
+
+# 3. Tell analytics-service the permission set changed
+go run ./play/publish-test -event rbac.permissions_changed -role restaurant_owner
+
+# 4. Same request, immediately — no need to wait out RBAC_CACHE_TTL_SEC
+curl.exe -H "Authorization: Bearer $TOKEN" http://localhost:4002/api/v1/analytics/restaurants/42/days?from=2026-08-01&to=2026-08-31
+# -> 200
+```
+
+## Backfill command (`cmd/backfill-aggs`)
+
+Replays historical orders through `service.OnOrderPlaced` — the exact same
+call the live `order.placed` consumer makes — so a backfilled row can never
+drift from what the live event would have produced. Reads from
+order-service's internal `GET /api/internal/orders/history` endpoint (never
+Postgres directly); see `docs/api-contracts.md` in `order-service` and
+`docs/implementation-plan.md` Phase 10 here for the full design.
+
+```powershell
+# Sanity-check first: fetch and log without writing to Mongo
+go run ./cmd/backfill-aggs -region eg -year 2025 -dry-run
+
+# Then actually apply it
+go run ./cmd/backfill-aggs -region eg -year 2025
+```
+
+One region and one calendar year per run (a year never straddles
+order-service's hot/archive Postgres boundary, so each run reads a single
+source). Safe to re-run for the same `region`/`year` — already-backfilled
+orders are skipped via the `event_ids` collection, keyed
+`backfill:order.placed:<orderId>`. That key is independent of a live
+event's real `eventId`, so it does **not** protect against double-counting
+an order the live consumer already processed off RabbitMQ — only backfill
+historical dates the live consumer never saw.
 
 ## Mongo collections & indexes
 
@@ -419,9 +497,27 @@ Declared idempotently on boot in `app/analytics/repository/indexes.go` —
 there is no migration system; Mongo is schemaless.
 
 - **`agg_restaurant_day`** — `{restaurant_id, date, currency, orders_count,
-  revenue_sum, delivery_ms_sum, delivery_ms_count, updated_at}`.
+  revenue_sum, delivery_ms_sum, delivery_ms_count, failed_count,
+  updated_at}`.
   - unique `(restaurant_id, date)`
-  - `(date, restaurant_id)` — supports future cross-restaurant range scans
+  - `(date, restaurant_id)` — supports cross-restaurant range scans
+    (`GET /restaurants/active`)
+- **`agg_branch_day`** — same shape, keyed by `branch_id`.
+  - unique `(branch_id, date)`
+- **`agg_product_day`** — `{branch_id, product_id, date, currency,
+  quantity_sum, revenue_sum, updated_at}`.
+  - unique `(branch_id, product_id, date)`
+- **`agg_platform_day`** — `{date, currency, orders_count, revenue_sum,
+  delivery_ms_sum, delivery_ms_count, failed_count,
+  online_payments_count, online_payments_amount_sum, updated_at}`, keyed
+  by **(date, currency)** — not just date — so two currencies active the
+  same day are never summed together.
+  - unique `(date, currency)`
+- **`order_context`** — `{order_id, currency, placed_at, recorded_at}`, a
+  short-lived per-order lookup written by `order.placed` and read back by
+  `order.delivered`/`order.rejected`.
+  - unique `order_id`
+  - TTL on `recorded_at` (`ORDER_CONTEXT_TTL_DAYS`, default 45 days)
 - **`event_ids`** — `{event_id, received_at}`, the idempotency ledger.
   - unique `event_id`
   - TTL on `received_at` (`EVENT_DEDUPE_TTL_DAYS`, default 7 days)
@@ -442,8 +538,10 @@ converges to the same totals — see
   `restaurantRole` (owner/branch_manager/staff) via core-service's
   `GET /api/internal/rbac/permissions?role=...`, cached in-process per role
   (`RBAC_CACHE_TTL_SEC`, default 5 min). Any other top-level role is 403.
-- Invalidating the cache on `rbac.permissions_changed` is **homework** —
-  see `plan.md`.
+- The cache is invalidated on `rbac.permissions_changed` (see
+  `lib/rbac/eventhandler.go`, wired in `lib/boot/boot.go`) — a role's
+  updated permissions take effect on the *next* request, not after
+  `RBAC_CACHE_TTL_SEC` expires.
 
 ## Troubleshooting
 
@@ -467,14 +565,17 @@ converges to the same totals — see
   parseable RFC3339 timestamp) or `"no handler registered"` (wrong
   `-routingKey`).
 
-## What's built vs. homework
+## What's built
 
-Full breakdown in [`plan.md`](./plan.md). Built for this slice:
-`agg_restaurant_day`, `order.placed` consumption, one read endpoint, full
-auth/RBAC/correlation/error/logging cross-cutting infra. Homework: three
-more aggregate collections, three more event handlers, seven more
-endpoints, the `rbac.permissions_changed` cache-invalidation consumer, and
-a backfill command.
+Full breakdown in [`plan.md`](./plan.md). Four aggregate collections
+(`agg_restaurant_day`, `agg_branch_day`, `agg_product_day`,
+`agg_platform_day`) plus the `order_context` lookup; five event handlers
+(`order.placed`, `order.delivered`, `order.rejected`, `payment.completed`,
+`rbac.permissions_changed`); eight read endpoints; full
+auth/RBAC/correlation/error/logging cross-cutting infra; and the
+`cmd/backfill-aggs` historical-replay command — verified both via the
+`play/` dev tools and live against real `core-service` + `order-service`
+instances (see `plan.md`'s "Live end-to-end verification").
 
 ## Further docs
 

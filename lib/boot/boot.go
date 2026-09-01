@@ -51,16 +51,20 @@ func Run() error {
 	}
 	log.Info("mongo connected", "database", cfg.Mongo.Database)
 
-	if err := repository.EnsureIndexes(ctx, db, cfg.EventDedupeTTL); err != nil {
+	if err := repository.EnsureIndexes(ctx, db, cfg.EventDedupeTTL, cfg.OrderContextTTL); err != nil {
 		return fmt.Errorf("boot: ensure indexes: %w", err)
 	}
 	log.Info("mongo indexes ensured")
 
 	// ── Repositories, service, controller ───────────────────────────────
 	restaurantDayRepo := repository.NewRestaurantDayRepo(db)
+	branchDayRepo := repository.NewBranchDayRepo(db)
+	productDayRepo := repository.NewProductDayRepo(db)
+	platformDayRepo := repository.NewPlatformDayRepo(db)
+	orderContextRepo := repository.NewOrderContextRepo(db)
 	eventIDsRepo := repository.NewEventIDsRepo(db)
 
-	analyticsService := service.New(restaurantDayRepo)
+	analyticsService := service.New(restaurantDayRepo, branchDayRepo, productDayRepo, platformDayRepo, orderContextRepo)
 	analyticsController := controller.New(analyticsService)
 
 	// ── core-service client + RBAC cache ────────────────────────────────
@@ -104,6 +108,25 @@ func Run() error {
 
 	if err := consumer.Start(ctx); err != nil {
 		return fmt.Errorf("boot: start consumer: %w", err)
+	}
+
+	// core.events is a separate exchange from order.events above — a second
+	// consumer/queue/binding, not a new routing key on the existing one (same
+	// broker connection and event_ids dedupe collection are safe to share:
+	// eventIds are unique regardless of source exchange).
+	coreEventsConsumer := coreevents.NewConsumer(broker, messaging.ConsumerOptions{
+		Exchange:           cfg.Rabbit.CoreEventsExchange,
+		Queue:              cfg.Rabbit.CoreEventsQueue,
+		BindingKeys:        cfg.Rabbit.CoreEventsBindings,
+		DeadLetterExchange: cfg.Rabbit.CoreEventsDLX,
+		DeadLetterQueue:    cfg.Rabbit.CoreEventsDLQ,
+		Prefetch:           cfg.Rabbit.Prefetch,
+	}, eventIDsRepo, log)
+
+	coreEventsConsumer.Register("rbac.permissions_changed", permCache.HandlePermissionsChanged(log))
+
+	if err := coreEventsConsumer.Start(ctx); err != nil {
+		return fmt.Errorf("boot: start core-events consumer: %w", err)
 	}
 
 	// ── Serve ────────────────────────────────────────────────────────────

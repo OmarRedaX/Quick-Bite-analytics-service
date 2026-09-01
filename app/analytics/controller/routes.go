@@ -20,6 +20,15 @@ func Routes(accessSecret string, permCache *rbac.Cache, ctrl *Controller) http.H
 	r.Use(rbac.Require(permCache, analytics.PermAnalyticsRead))
 
 	r.Get("/restaurants/{restaurantId}/days", apperror.Wrap(ctrl.GetRestaurantDays))
+	r.Get("/restaurants/{restaurantId}/failures", apperror.Wrap(ctrl.GetRestaurantFailures))
+	r.Get("/restaurants/{restaurantId}/delivery-avg", apperror.Wrap(ctrl.GetRestaurantDeliveryAvg))
+	r.Get("/restaurants/active", apperror.Wrap(ctrl.GetActiveRestaurants))
+
+	r.Get("/branches/{branchId}/days", apperror.Wrap(ctrl.GetBranchDays))
+	r.Get("/branches/{branchId}/products/{productId}/days", apperror.Wrap(ctrl.GetProductDays))
+
+	r.Get("/platform/days", apperror.Wrap(ctrl.GetPlatformDays))
+	r.Get("/platform/summary", apperror.Wrap(ctrl.GetPlatformSummary))
 
 	return r
 }

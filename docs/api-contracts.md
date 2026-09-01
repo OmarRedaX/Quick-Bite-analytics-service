@@ -24,6 +24,12 @@ below. All timestamps are ISO-8601 UTC; all money is integer minor units.
 | `RBAC_UNAVAILABLE` | 503 | core-service unreachable and the permission cache has no entry for this role |
 | `INTERNAL_ERROR` | 500 | unexpected failure; message is always the generic "Something went wrong" — internals never leak |
 
+Every endpoint below shares the same auth (`access_token` cookie or
+`Authorization: Bearer`) and RBAC (`analytics:read`, `system_admin`
+bypasses) as `GET /restaurants/:id/days`, and the same `from`/`to`
+`VALIDATION_ERROR`/`ANALYTICS_INVALID_DATE_RANGE` behavior — only the
+path/response shape differs below.
+
 ---
 
 ## `GET /health`
@@ -106,18 +112,156 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 ---
 
-## Homework endpoints (not built — documented for the shape they'd take)
+## `GET /api/v1/analytics/restaurants/{restaurantId}/failures`
 
-All of the following follow the same envelope, auth, and RBAC pattern
-above. None exist in code yet — see `plan.md` and
-`docs/implementation-plan.md` Phase 7+.
+Day-grained order/failure counts for one restaurant, `failedCount`
+populated by the `order.rejected` handler (bucketed by the rejection's own
+date, not the order's original placed date — see
+`analytics.OnOrderRejectedInput`'s doc comment).
 
-| Endpoint | Sketch |
-| --- | --- |
-| `GET /restaurants/{id}/failures?from=&to=` | derived from a `failed_count`-style field added to `agg_restaurant_day` by the homework `order.rejected` handler — no new collection |
-| `GET /restaurants/{id}/delivery-avg?from=&to=` | derived from `delivery_ms_sum`/`delivery_ms_count`, already reserved on the `agg_restaurant_day` document today, populated by the homework `order.delivered` handler |
-| `GET /branches/{id}/days?from=&to=` | same shape as restaurant days, backed by the homework `agg_branch_day` |
-| `GET /branches/{id}/products/{productId}/days?from=&to=` | backed by the homework `agg_product_day` |
-| `GET /restaurants/active?from=&to=` | count of distinct restaurants with `orders_count > 0` in range — an aggregation pipeline over `agg_restaurant_day`, not a stored field |
-| `GET /platform/days?from=&to=` | backed by the homework `agg_platform_day` |
-| `GET /platform/summary?from=&to=` | totals across the range — a `$group` aggregation over `agg_platform_day`, no new storage |
+**Query params:** `from`, `to` — same as `.../days`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    { "date": "2026-08-31", "ordersCount": 1, "failedCount": 1, "failureRate": 1 }
+  ]
+}
+```
+
+`failureRate` = `failedCount / ordersCount` (0 if `ordersCount` is 0),
+a fraction, computed in the service layer — never stored.
+
+## `GET /api/v1/analytics/restaurants/{restaurantId}/delivery-avg`
+
+Day-grained delivery-duration rollup for one restaurant, derived from
+`delivery_ms_sum`/`delivery_ms_count` on `agg_restaurant_day`, populated by
+the `order.delivered` handler.
+
+**Query params:** `from`, `to` — same as `.../days`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    { "date": "2026-08-31", "deliveredCount": 1, "avgDeliveryMs": 12481 }
+  ]
+}
+```
+
+`avgDeliveryMs` = `delivery_ms_sum / delivery_ms_count`, integer division,
+computed in the service layer — never stored. Bucketed onto the date the
+order was **placed** (looked up via `order_context`), not the date it was
+delivered.
+
+## `GET /api/v1/analytics/restaurants/active`
+
+Count of distinct restaurants with `orders_count > 0` in `[from, to]` — an
+aggregation pipeline over `agg_restaurant_day` (`$match` + `$group` by
+`restaurant_id` + `$count`), not a stored field.
+
+**Query params:** `from`, `to`.
+
+**200 response:**
+
+```jsonc
+{ "success": true, "data": { "count": 1 } }
+```
+
+## `GET /api/v1/analytics/branches/{branchId}/days`
+
+Day-grained order/revenue rollup for one branch, same shape as restaurant
+days, backed by `agg_branch_day`.
+
+**Query params:** `from`, `to`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    { "date": "2026-08-31", "ordersCount": 1, "revenueMinor": 4000, "currency": "EGP", "avgOrderMinor": 4000 }
+  ]
+}
+```
+
+## `GET /api/v1/analytics/branches/{branchId}/products/{productId}/days`
+
+Day-grained per-product rollup, backed by `agg_product_day`. Populated by
+`order.placed`'s line items in one `BulkWrite` per order (N items → N
+`UpdateOne` models, not N round trips).
+
+**Query params:** `from`, `to`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    { "date": "2026-08-31", "quantitySum": 2, "revenueMinor": 3000, "currency": "EGP", "avgUnitPriceMinor": 1500 }
+  ]
+}
+```
+
+`avgUnitPriceMinor` = `revenueMinor / quantitySum` — derived, never stored.
+
+## `GET /api/v1/analytics/platform/days`
+
+Day-grained platform-wide rollup, backed by `agg_platform_day`. A single
+`date` can produce **more than one row** — the collection is keyed by
+`(date, currency)` so two currencies active the same day are never summed
+together.
+
+**Query params:** `from`, `to`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    { "date": "2026-08-31", "currency": "EGP", "ordersCount": 1, "revenueMinor": 4000, "avgOrderMinor": 4000 }
+  ]
+}
+```
+
+## `GET /api/v1/analytics/platform/summary`
+
+Totals across `[from, to]`, one row per currency — a single `$group`
+aggregation over `agg_platform_day`, no new storage.
+
+**Query params:** `from`, `to`.
+
+**200 response:**
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    {
+      "currency": "EGP",
+      "ordersCount": 1,
+      "revenueMinor": 4000,
+      "avgOrderMinor": 4000,
+      "failedCount": 1,
+      "failureRate": 1,
+      "deliveredCount": 0,
+      "avgDeliveryMs": 0,
+      "onlinePaymentsCount": 0,
+      "onlinePaymentsAmountMinor": 0
+    }
+  ]
+}
+```
+
+`onlinePaymentsCount`/`onlinePaymentsAmountMinor` come from
+`payment.completed` and track online-gateway capture volume for
+reconciliation — a distinct KPI from `revenueMinor`, which already counts
+every order (COD or online) once via `order.placed`.

@@ -18,5 +18,6 @@ type RestaurantDay struct {
 	RevenueSumMinor int64     `bson:"revenue_sum"`
 	DeliveryMsSum   int64     `bson:"delivery_ms_sum"`
 	DeliveryMsCount int64     `bson:"delivery_ms_count"`
+	FailedCount     int64     `bson:"failed_count"`
 	UpdatedAt       time.Time `bson:"updated_at"`
 }

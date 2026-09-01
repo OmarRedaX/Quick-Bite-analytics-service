@@ -15,6 +15,10 @@ import (
 
 const (
 	CollRestaurantDay = "agg_restaurant_day"
+	CollBranchDay     = "agg_branch_day"
+	CollProductDay    = "agg_product_day"
+	CollPlatformDay   = "agg_platform_day"
+	CollOrderContext  = "order_context"
 	CollEventIDs      = "event_ids"
 )
 
@@ -23,7 +27,7 @@ const (
 // to run, only indexes to declare — so this file is this module's entire
 // "migration" surface. Lives here, not in pkg/mongo, because pkg/ must not
 // know collection names (app-specific knowledge).
-func EnsureIndexes(ctx context.Context, db *mongo.Database, eventDedupeTTL time.Duration) error {
+func EnsureIndexes(ctx context.Context, db *mongo.Database, eventDedupeTTL, orderContextTTL time.Duration) error {
 	restaurantDay := db.Collection(CollRestaurantDay)
 	if _, err := restaurantDay.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{
@@ -40,6 +44,61 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database, eventDedupeTTL time.
 			// today is fully served by the unique index above).
 			Keys:    bson.D{{Key: "date", Value: 1}, {Key: "restaurant_id", Value: 1}},
 			Options: options.Index().SetName("idx_date_restaurant_id"),
+		},
+	}); err != nil {
+		return err
+	}
+
+	branchDay := db.Collection(CollBranchDay)
+	if _, err := branchDay.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			// supports branch_day.repo.go's ApplyOrderPlaced/Delivered/Rejected
+			// upserts (equality point-lookup on both fields).
+			Keys:    bson.D{{Key: "branch_id", Value: 1}, {Key: "date", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uq_branch_id_date"),
+		},
+	}); err != nil {
+		return err
+	}
+
+	productDay := db.Collection(CollProductDay)
+	if _, err := productDay.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			// supports product_day.repo.go's BulkWrite upserts and
+			// GET /branches/:id/products/:productId/days range scans.
+			Keys:    bson.D{{Key: "branch_id", Value: 1}, {Key: "product_id", Value: 1}, {Key: "date", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uq_branch_id_product_id_date"),
+		},
+	}); err != nil {
+		return err
+	}
+
+	platformDay := db.Collection(CollPlatformDay)
+	if _, err := platformDay.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			// keyed by (date, currency) — not just date — so two currencies
+			// active the same day never get summed into one row. Supports
+			// both the upsert and GET /platform/days|summary range scans.
+			Keys:    bson.D{{Key: "date", Value: 1}, {Key: "currency", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uq_date_currency"),
+		},
+	}); err != nil {
+		return err
+	}
+
+	orderContext := db.Collection(CollOrderContext)
+	if _, err := orderContext.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "order_id", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uq_order_id"),
+		},
+		{
+			// TTL reaper — bounds this collection's size without an app-side
+			// cleanup job, same pattern as event_ids below. Window is longer
+			// than event_ids' because it must outlive the gap between
+			// order.placed and a (possibly slow) order.delivered/rejected.
+			Keys:    bson.D{{Key: "recorded_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(int32(orderContextTTL.Seconds())).SetName("ttl_recorded_at"),
 		},
 	}); err != nil {
 		return err

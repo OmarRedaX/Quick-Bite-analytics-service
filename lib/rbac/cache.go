@@ -54,9 +54,8 @@ func (c *Cache) GetPermissions(ctx context.Context, role string) ([]string, erro
 }
 
 // Invalidate drops one role's cache entry, or all entries if role == "".
-// Homework hook: wire this to a `rbac.permissions_changed` consumer handler
-// (see docs/implementation-plan.md Phase 8) — not called anywhere in this
-// slice.
+// Wired to the rbac.permissions_changed consumer handler — see
+// HandlePermissionsChanged (lib/rbac/eventhandler.go) and lib/boot/boot.go.
 func (c *Cache) Invalidate(role string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
