@@ -29,6 +29,7 @@ its own.
 - [Setup](#setup)
 - [Running it — three terminals](#running-it--three-terminals)
 - [Verifying the slice end-to-end](#verifying-the-slice-end-to-end)
+- [Postman collection (manual QA)](#postman-collection-manual-qa)
 - [API](#api)
 - [Events consumed](#events-consumed)
 - [Response envelope & error codes](#response-envelope--error-codes)
@@ -289,6 +290,23 @@ Run these **in order** against the three terminals above.
     curl -s -H "Authorization: Bearer $TOKEN" ".../restaurants/999999/days?from=2026-01-01&to=2026-12-31"
     # {"success":true,"data":[]}
     ```
+
+## Postman collection (manual QA)
+
+[`postman/`](./postman) holds the shared QuickBite Postman collections for
+manual, cross-service QA — `core-service.postman_collection.json`,
+`order-service.postman_collection.json`, and the
+`QuickBite.postman_environment.json` environment they run against.
+
+[`TESTING_GUIDE.md`](./TESTING_GUIDE.md) is the scripted run-book: import
+the three files into Postman, start `core-service` + `order-service` (+
+worker), and hit the requests in order — the collection auto-captures the
+tokens/IDs each step needs from the last. This service's own read
+endpoints aren't in that collection yet (they're read-only and covered by
+the `curl` walkthrough in
+[Verifying the slice end-to-end](#verifying-the-slice-end-to-end) above);
+the guide is for exercising the order-placement flow that produces the
+events this service consumes.
 
 ## API
 
