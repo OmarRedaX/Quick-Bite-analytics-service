@@ -29,6 +29,7 @@ its own.
 - [Setup](#setup)
 - [Running it — three terminals](#running-it--three-terminals)
 - [Verifying the slice end-to-end](#verifying-the-slice-end-to-end)
+- [Automated tests](#automated-tests)
 - [Postman collection (manual QA)](#postman-collection-manual-qa)
 - [API](#api)
 - [Events consumed](#events-consumed)
@@ -290,6 +291,64 @@ Run these **in order** against the three terminals above.
     curl -s -H "Authorization: Bearer $TOKEN" ".../restaurants/999999/days?from=2026-01-01&to=2026-12-31"
     # {"success":true,"data":[]}
     ```
+
+## Automated tests
+
+**116 tests, zero production-code changes.** Go requires unit test files to
+live in the same directory as the package they test (to reach unexported
+symbols), so the suite is split the way Go itself forces it, not the way the
+Node services split theirs:
+
+```bash
+go test ./...                            # unit only — 86 tests, no Mongo needed
+go test -tags=integration ./tests/integration/...   # integration — 30 tests, needs a real local Mongo
+```
+
+| Tier | Location | Count | Needs |
+| ---- | -------- | ----- | ----- |
+| Unit | colocated `<file>_test.go` next to the code (`lib/rbac/cache_test.go`, `app/analytics/service/analytics.service_test.go`, etc.) | 86 | nothing but the Go toolchain |
+| Integration | `tests/integration/*_test.go` (`//go:build integration`) | 30 | a real local Mongo at `MONGO_URI` (test database `MONGO_TEST_DATABASE`, default `quickbite_analytics_test` — always `_test`-suffixed, never the dev database) |
+
+No `testify` or any other test-only dependency — stdlib `testing` throughout,
+matching this repo's own minimal-dependency convention (`CLAUDE.md` §2).
+
+**What's covered**: every service-layer event fan-out and derived-field
+formula (avgOrderMinor, failureRate, avgDeliveryMs, avgUnitPriceMinor,
+`OrderContext` hit/miss behavior), all four event handlers' payload parsing,
+JWT verification, the RBAC permission cache and its `rbac.permissions_changed`
+invalidation handler, the RabbitMQ consumer's dispatch/idempotency/DLQ-routing
+logic (`lib/coreevents`), every DTO's query validation, every HTTP response
+envelope shape, the retry/timeout contract to core-service, all 8 read
+endpoints end-to-end against real Mongo (auth, RBAC, seeded data, derived
+fields, unknown-id and `from>to` edge cases), the event→aggregate→read flow
+through the real HTTP router (including the tricky midnight-boundary
+delivery-duration bucketing case), and idempotent duplicate-event handling
+against the real `event_ids` unique index.
+
+**Coverage** (merged unit + integration, `go tool cover`):
+
+- **70.5%** of this service's own production code (`app/`, `lib/`, `pkg/`)
+- **56.1%** repo-wide, which also counts things deliberately left untested:
+  `cmd/*` entry points, gitignored `play/*` dev tools, `lib/boot` (pure
+  wiring — duplicated intentionally into the integration test scaffold
+  instead of shared, per that package's own doc comment), `lib/config`
+  (a declarative struct with no logic of its own), and `pkg/messaging`
+  (the real RabbitMQ wire adapter — needs a live broker to test
+  meaningfully, an open question rather than an oversight)
+
+| Package | Coverage | Package | Coverage |
+| ------- | -------- | ------- | -------- |
+| `dto`, `lib/appcontext`, `lib/errors`, `lib/http`, `lib/middleware` | 100% | `lib/coreevents`, `eventhandlers` | 89.7% |
+| `lib/auth` | 96.7% | `lib/rbac` | 89.1% |
+| `lib/coreclient` | 91.7% | `service` | 88.9% |
+| `pkg/httpclient` | 87.8% | `repository` | 85.2% |
+| `controller` | 81.8% | `pkg/mongo` | 75.0% |
+
+No coverage threshold was ever set as a gate — these numbers are reported for
+visibility, closed against real, identified gaps (e.g. the RabbitMQ
+consumer's dispatch logic, initially missed because it looked infra-bound but
+is actually fully unit-testable via its `Broker`/`EventDeduper` interfaces),
+not chased to hit a target.
 
 ## Postman collection (manual QA)
 
