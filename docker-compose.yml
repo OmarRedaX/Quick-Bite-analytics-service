@@ -1,0 +1,49 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: quickbite_analytics_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics","-q","ping"]
+      interval: 10s
+      retries: 10
+
+  analytics-service:
+    build: .
+    env_file:
+      - .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      # core-service/order-service run as native processes on the host in dev
+      # (see README) rather than in this compose file — reach them via the
+      # Docker-Desktop host gateway. Point these at real container names
+      # instead if you fold this service into the combined compose file.
+      CORE_SERVICE_BASE_URL: http://host.docker.internal:3000
+      ORDER_SERVICE_BASE_URL: http://host.docker.internal:4000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "4002:4002"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
